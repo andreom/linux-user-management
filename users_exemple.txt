@@ -1,0 +1,25 @@
+# Exemplo de arquivo de usuários
+# Linhas iniciadas com # são comentários e serão ignoradas
+# 
+# Formato suportado:
+# 1. Lista separada por ';' em uma linha
+# 2. Um usuário por linha
+# 3. Combinação dos dois formatos
+
+# Exemplo 1: Lista separada por ponto e vírgula
+user1;user2;user3
+
+# Exemplo 2: Usuários individuais por linha
+user1
+user2
+user3
+
+# Exemplo 3: Misturado
+user1;user2
+user3
+
+# Convenções de nomes sugeridas:
+# - Prefixo 'sas_' para identificar usuários do sistema SAS
+# - Formato: sas_nomecompleto ou sas_primeiranome + iniciais
+# - Apenas letras minúsculas, números, _ e -
+# - Máximo 32 caracteres
