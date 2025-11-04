@@ -9,7 +9,7 @@
 # Autor: Sistema de Gerenciamento de Usuários  
 # Versão: 1.0
 
-# Cores 
+# Cores
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
@@ -17,8 +17,26 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Configurações
-PRIMARY_GID=10000
-HOME_GROUP="sas"
+readonly PRIMARY_GID=10000
+readonly HOME_GROUP="sas"
+readonly LOG_FILE="/var/log/user_management.log"
+
+# Tratamento de sinais para limpeza
+cleanup() {
+    echo -e "${YELLOW}[AVISO]${NC} Script interrompido" >&2
+    exit 130
+}
+
+trap cleanup SIGINT SIGTERM
+
+# Função para logging em arquivo
+log_to_file() {
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    if [[ -w "$LOG_FILE" ]] || [[ -w "$(dirname "$LOG_FILE")" ]]; then
+        echo "[$timestamp] $message" >> "$LOG_FILE" 2>/dev/null
+    fi
+}
 
 echo -e "${BLUE}=== VERIFICAÇÃO DE USUÁRIOS COM GID $PRIMARY_GID ===${NC}"
 echo ""

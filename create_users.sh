@@ -13,12 +13,34 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Configurações 
-PRIMARY_GID=10000
-PRIMARY_GROUP_NAME="GROUP"
-HOME_GROUP="GROUP"
-HOME_BASE="/home"
+# Configurações
+readonly PRIMARY_GID=10000
+readonly PRIMARY_GROUP_NAME="users10000"
+readonly HOME_GROUP="sas"
+readonly HOME_BASE="/home"
+readonly LOG_FILE="/var/log/user_management.log"
 DEFAULT_SHELL="/bin/bash"
+FORCE_PASSWORD_CHANGE=false
+USER_GECOS=""
+SECONDARY_GROUPS=""
+REQUIRE_PASSWORD_PROMPT=false
+
+# Tratamento de sinais para limpeza
+cleanup() {
+    log_warning "Script interrompido. Limpando..."
+    exit 130
+}
+
+trap cleanup SIGINT SIGTERM
+
+# Função para logging em arquivo
+log_to_file() {
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    if [[ -w "$LOG_FILE" ]] || [[ -w "$(dirname "$LOG_FILE")" ]]; then
+        echo "[$timestamp] $message" >> "$LOG_FILE" 2>/dev/null
+    fi
+}
 
 # Função para exibir ajuda
 show_help() {
@@ -31,8 +53,12 @@ show_help() {
     echo -e "${CYAN}Opções:${NC}"
     echo "  -f, --file           Lê lista de usuários de arquivo"
     echo "  -p, --password       Define senha padrão para todos os usuários"
+    echo "  -P, --prompt-password Solicita senha de forma segura (não aparece no histórico)"
     echo "  -s, --shell          Define shell personalizado (padrão: /bin/bash)"
-    echo "  -d, --dry-run        Executa sem criar usuários (apenas mostra o que seria feito)"
+    echo "  -g, --gecos          Define descrição/GECOS do usuário (nome completo, etc)"
+    echo "  -G, --groups         Grupos secundários (separados por vírgula)"
+    echo "  -c, --change-password Força troca de senha no primeiro login"
+    echo "  -d, --dry-run        Executa sem criar usuários (mostra comandos exatos)"
     echo "  -v, --verbose        Modo verboso (mais informações)"
     echo "  -h, --help           Exibe esta ajuda"
     echo ""
@@ -58,23 +84,28 @@ show_help() {
 # Função para log
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1" >&2
+    log_to_file "INFO: $1"
 }
 
 log_success() {
     echo -e "${GREEN}[SUCESSO]${NC} $1" >&2
+    log_to_file "SUCESSO: $1"
 }
 
 log_warning() {
     echo -e "${YELLOW}[AVISO]${NC} $1" >&2
+    log_to_file "AVISO: $1"
 }
 
 log_error() {
     echo -e "${RED}[ERRO]${NC} $1" >&2
+    log_to_file "ERRO: $1"
 }
 
 log_verbose() {
     if [[ "$VERBOSE" == "true" ]]; then
         echo -e "${CYAN}[VERBOSE]${NC} $1" >&2
+        log_to_file "VERBOSE: $1"
     fi
 }
 
@@ -108,6 +139,83 @@ validate_username() {
     fi
     
     return 0
+}
+
+# Função para validar complexidade de senha
+validate_password() {
+    local password="$1"
+
+    # Mínimo de 8 caracteres
+    if [[ ${#password} -lt 8 ]]; then
+        log_error "Senha deve ter no mínimo 8 caracteres"
+        return 1
+    fi
+
+    # Verificar se contém pelo menos uma letra maiúscula
+    if [[ ! "$password" =~ [A-Z] ]]; then
+        log_error "Senha deve conter pelo menos uma letra maiúscula"
+        return 1
+    fi
+
+    # Verificar se contém pelo menos uma letra minúscula
+    if [[ ! "$password" =~ [a-z] ]]; then
+        log_error "Senha deve conter pelo menos uma letra minúscula"
+        return 1
+    fi
+
+    # Verificar se contém pelo menos um número
+    if [[ ! "$password" =~ [0-9] ]]; then
+        log_error "Senha deve conter pelo menos um número"
+        return 1
+    fi
+
+    # Verificar se contém pelo menos um caractere especial
+    if [[ ! "$password" =~ [^a-zA-Z0-9] ]]; then
+        log_error "Senha deve conter pelo menos um caractere especial (@, #, $, etc)"
+        return 1
+    fi
+
+    return 0
+}
+
+# Função para verificar espaço em disco
+check_disk_space() {
+    local path="$1"
+    local required_mb="${2:-100}" # Mínimo 100MB por padrão
+
+    # Obter espaço disponível em MB
+    local available_mb=$(df -BM "$path" | awk 'NR==2 {print $4}' | sed 's/M//')
+
+    if [[ $available_mb -lt $required_mb ]]; then
+        log_error "Espaço insuficiente em $path. Disponível: ${available_mb}MB, Necessário: ${required_mb}MB"
+        return 1
+    fi
+
+    log_verbose "Espaço disponível em $path: ${available_mb}MB"
+    return 0
+}
+
+# Função para verificar se UID está disponível
+is_uid_available() {
+    local uid="$1"
+    getent passwd "$uid" >/dev/null 2>&1
+    return $?
+}
+
+# Função para obter próximo UID disponível
+get_next_available_uid() {
+    local start_uid="${1:-1000}"
+    local max_uid="${2:-60000}"
+
+    for ((uid=start_uid; uid<=max_uid; uid++)); do
+        if ! is_uid_available "$uid"; then
+            echo "$uid"
+            return 0
+        fi
+    done
+
+    log_error "Nenhum UID disponível no intervalo $start_uid-$max_uid"
+    return 1
 }
 
 # Função para criar grupo se não existir
@@ -151,36 +259,62 @@ ensure_group_exists() {
 create_user() {
     local username="$1"
     local password="$2"
-    
+
     # Validações
     if ! validate_username "$username"; then
         log_error "Nome de usuário inválido: '$username'. Use apenas letras minúsculas, números, _ e -"
         return 1
     fi
-    
+
     if user_exists "$username"; then
         log_warning "Usuário '$username' já existe, pulando..."
         return 1
     fi
-    
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Criaria usuário: $username"
-        log_verbose "[DRY RUN] - GID primário: $PRIMARY_GID"
-        log_verbose "[DRY RUN] - Home: $HOME_BASE/$username"
-        log_verbose "[DRY RUN] - Grupo do home: $HOME_GROUP"
-        return 0
+
+    # Verificar espaço em disco
+    if ! check_disk_space "$HOME_BASE" 100; then
+        log_error "Espaço em disco insuficiente para criar usuário"
+        return 1
     fi
-    
-    log_info "Criando usuário '$username'..."
-    
+
+    # Validar senha se fornecida
+    if [[ -n "$password" ]]; then
+        if ! validate_password "$password"; then
+            return 1
+        fi
+    fi
+
     # Criar o usuário com grupo primário específico
     local cmd="useradd"
     cmd="$cmd -g $PRIMARY_GID"                    # Grupo primário
     cmd="$cmd -d $HOME_BASE/$username"            # Diretório home
     cmd="$cmd -m"                                 # Criar diretório home
     cmd="$cmd -s $DEFAULT_SHELL"                  # Shell padrão
+
+    # Adicionar GECOS se fornecido
+    if [[ -n "$USER_GECOS" ]]; then
+        cmd="$cmd -c \"$USER_GECOS\""
+    fi
+
+    # Adicionar grupos secundários se fornecidos
+    if [[ -n "$SECONDARY_GROUPS" ]]; then
+        cmd="$cmd -G \"$SECONDARY_GROUPS\""
+    fi
+
     cmd="$cmd $username"
-    
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Executaria comando: $cmd"
+        log_verbose "[DRY RUN] - GID primário: $PRIMARY_GID"
+        log_verbose "[DRY RUN] - Home: $HOME_BASE/$username"
+        log_verbose "[DRY RUN] - Grupo do home: $HOME_GROUP"
+        [[ -n "$USER_GECOS" ]] && log_verbose "[DRY RUN] - GECOS: $USER_GECOS"
+        [[ -n "$SECONDARY_GROUPS" ]] && log_verbose "[DRY RUN] - Grupos secundários: $SECONDARY_GROUPS"
+        [[ "$FORCE_PASSWORD_CHANGE" == "true" ]] && log_verbose "[DRY RUN] - Forçaria troca de senha no primeiro login"
+        return 0
+    fi
+
+    log_info "Criando usuário '$username'..."
     log_verbose "Executando: $cmd"
     
     if eval "$cmd" 2>/dev/null; then
@@ -198,7 +332,7 @@ create_user() {
                 
                 # Verificar permissões e ajustar se necessário
                 chmod 700 "$home_dir" 2>/dev/null
-                log_verbose "Permissões do diretório ajustadas para 750"
+                log_verbose "Permissões do diretório ajustadas para 700"
             else
                 log_error "Falha ao alterar grupo do diretório para '$HOME_GROUP'"
                 log_warning "Verifique se o grupo '$HOME_GROUP' existe"
@@ -212,6 +346,16 @@ create_user() {
             log_info "Definindo senha para usuário '$username'"
             if echo "$username:$password" | chpasswd 2>/dev/null; then
                 log_success "Senha definida para usuário '$username'"
+
+                # Forçar troca de senha no primeiro login se solicitado
+                if [[ "$FORCE_PASSWORD_CHANGE" == "true" ]]; then
+                    log_info "Configurando expiração de senha para '$username'"
+                    if chage -d 0 "$username" 2>/dev/null; then
+                        log_success "Usuário '$username' será forçado a trocar senha no primeiro login"
+                    else
+                        log_error "Erro ao configurar expiração de senha para '$username'"
+                    fi
+                fi
             else
                 log_error "Erro ao definir senha para usuário '$username'"
             fi
@@ -310,11 +454,60 @@ process_users() {
     log_info "Total processado: $total"
 }
 
+# Função para validar sintaxe do arquivo
+validate_file_syntax() {
+    local file_path="$1"
+    local line_num=0
+    local errors=0
+
+    log_info "Validando sintaxe do arquivo: $file_path"
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        ((line_num++))
+
+        # Remove espaços e pula comentários/linhas vazias
+        line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [[ -z "$line" ]] || [[ "$line" =~ ^# ]]; then
+            continue
+        fi
+
+        # Se a linha contém ';', valida cada usuário
+        if [[ "$line" == *";"* ]]; then
+            local OLD_IFS="$IFS"
+            IFS=';'
+            read -ra LINE_USERS <<< "$line"
+            IFS="$OLD_IFS"
+
+            for user in "${LINE_USERS[@]}"; do
+                user=$(echo "$user" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                if [[ -n "$user" ]] && ! validate_username "$user"; then
+                    log_error "Linha $line_num: Nome de usuário inválido: '$user'"
+                    ((errors++))
+                fi
+            done
+        else
+            # Linha única
+            if ! validate_username "$line"; then
+                log_error "Linha $line_num: Nome de usuário inválido: '$line'"
+                ((errors++))
+            fi
+        fi
+    done < "$file_path"
+
+    if [[ $errors -gt 0 ]]; then
+        log_error "Encontrados $errors erro(s) de validação no arquivo"
+        return 1
+    fi
+
+    log_success "Arquivo validado com sucesso"
+    return 0
+}
+
 # Função para ler usuários de arquivo
 read_users_from_file() {
     local file_path="$1"
     local users_array=()
-    
+
     log_info "Lendo usuários do arquivo: $file_path"
     
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -439,9 +632,25 @@ main() {
                 password="$2"
                 shift 2
                 ;;
+            -P|--prompt-password)
+                REQUIRE_PASSWORD_PROMPT=true
+                shift
+                ;;
             -s|--shell)
                 DEFAULT_SHELL="$2"
                 shift 2
+                ;;
+            -g|--gecos)
+                USER_GECOS="$2"
+                shift 2
+                ;;
+            -G|--groups)
+                SECONDARY_GROUPS="$2"
+                shift 2
+                ;;
+            -c|--change-password)
+                FORCE_PASSWORD_CHANGE=true
+                shift
                 ;;
             -d|--dry-run)
                 DRY_RUN=true
@@ -472,6 +681,26 @@ main() {
                 ;;
         esac
     done
+
+    # Solicitar senha de forma segura se necessário
+    if [[ "$REQUIRE_PASSWORD_PROMPT" == "true" ]] && [[ "$DRY_RUN" == "false" ]]; then
+        echo -n "Digite a senha padrão para os usuários: " >&2
+        read -s password
+        echo "" >&2
+
+        echo -n "Confirme a senha: " >&2
+        read -s password_confirm
+        echo "" >&2
+
+        if [[ "$password" != "$password_confirm" ]]; then
+            log_error "As senhas não coincidem"
+            exit 1
+        fi
+
+        if ! validate_password "$password"; then
+            exit 1
+        fi
+    fi
     
     # Verificar dependências
     check_dependencies
@@ -488,7 +717,12 @@ main() {
             log_error "Arquivo '$file_path' não encontrado"
             exit 1
         fi
-        
+
+        # Validar sintaxe do arquivo antes de processar
+        if ! validate_file_syntax "$file_path"; then
+            exit 1
+        fi
+
         user_list=$(read_users_from_file "$file_path")
     fi
     

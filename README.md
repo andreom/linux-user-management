@@ -15,7 +15,7 @@ Scripts para gerenciamento de usuários Linux com configurações específicas p
 
 | Script | Descrição |
 |--------|-----------|
-| `create_users_gid.sh` | Cria usuários com GID 10000 e grupo 'sas' nos diretórios |
+| `create_users.sh` | Cria usuários com GID 10000 e grupo 'sas' nos diretórios |
 | `delete_users.sh` | Exclui usuários com opções avançadas |
 | `verify_users.sh` | Verifica configurações dos usuários criados |
 
@@ -37,13 +37,25 @@ chmod +x *.sh
 #### Via linha de comando:
 ```bash
 # Criar usuários separados por ';'
-sudo ./create_users_gid.sh "user1;user2;user3"
+sudo ./create_users.sh "user1;user2;user3"
 
-# Com senha padrão
-sudo ./create_users_gid.sh -p "MinhaSenh@123" "user1;user2;user3"
+# Com senha segura (solicita interativamente - mais seguro)
+sudo ./create_users.sh -P "user1;user2;user3"
 
-# Teste sem criar (dry-run)
-sudo ./create_users_gid.sh -d "user1;user2;user3"
+# Com senha via parâmetro (menos seguro, aparece no histórico)
+sudo ./create_users.sh -p "MinhaSenh@123!" "user1;user2;user3"
+
+# Forçar troca de senha no primeiro login
+sudo ./create_users.sh -P -c "user1;user2;user3"
+
+# Com descrição do usuário (GECOS)
+sudo ./create_users.sh -g "João Silva" -P "joao"
+
+# Com grupos secundários
+sudo ./create_users.sh -G "docker,sudo" -P "user1"
+
+# Teste sem criar (dry-run - mostra comandos exatos)
+sudo ./create_users.sh -d "user1;user2;user3"
 ```
 
 #### Via arquivo:
@@ -51,8 +63,11 @@ sudo ./create_users_gid.sh -d "user1;user2;user3"
 # Criar arquivo de usuários
 echo "user1;user2;user3" > users.txt
 
-# Executar
-sudo ./create_users_gid.sh -f users.txt -p "MinhaSenh@123"
+# Executar com senha segura
+sudo ./create_users.sh -f users.txt -P
+
+# Com todas as opções
+sudo ./create_users.sh -f users.txt -P -c -g "Funcionário SAS" -G "sas,docker" -v
 ```
 
 ### Verificar Usuários
@@ -109,18 +124,40 @@ user3
 - **Grupo do diretório home**: 'sas'
 - **Diretórios base**: /home/
 - **Shell padrão**: /bin/bash
-- **Permissões home**: 750
+- **Permissões home**: 700
+- **Log de operações**: /var/log/user_management.log
 
-### Validações:
+### Validações e Segurança:
 - ✅ Nomes de usuário válidos (a-z, 0-9, _, -)
 - ✅ Máximo 32 caracteres
-- ✅ Senha mínima de 4 caracteres
+- ✅ **Validação de complexidade de senha**:
+  - Mínimo 8 caracteres
+  - Pelo menos 1 letra maiúscula
+  - Pelo menos 1 letra minúscula
+  - Pelo menos 1 número
+  - Pelo menos 1 caractere especial
 - ✅ Verificação de usuários existentes
 - ✅ Proteção contra usuários do sistema
+- ✅ Verificação de espaço em disco (mínimo 100MB)
+- ✅ Verificação de UID disponível
+- ✅ Validação de sintaxe de arquivo antes de processar
+- ✅ Tratamento de sinais (Ctrl+C) para limpeza adequada
+- ✅ Logging de todas as operações em arquivo
+
+### Segurança de Senhas:
+- 🔒 **Recomendado**: Use `-P` para inserir senha de forma interativa (não aparece no histórico)
+- ⚠️ **Não recomendado**: Usar `-p` (senha aparece no histórico do shell e em `ps`)
+- 🔐 Opção de forçar troca de senha no primeiro login (`-c`)
+
+### Script de Exclusão - Verificações Adicionais:
+- ✅ Verificação de processos em execução do usuário
+- ✅ Verificação de espaço em disco antes de backup
+- ✅ Verificação de integridade do backup após criação
+- ✅ Proteção contra exclusão de usuários do sistema
 
 ## 🎯 Exemplos Completos
 
-### Exemplo 1: Criar usuários corporativos
+### Exemplo 1: Criar usuários corporativos (modo seguro)
 ```bash
 # Criar arquivo
 cat > funcionarios.txt << EOF
@@ -129,38 +166,57 @@ sas_ana
 sas_carlos;sas_lucia
 EOF
 
-# Executar
-sudo ./create_users_gid.sh -f funcionarios.txt -p "Empresa@2025" -v
+# Executar com senha segura e forçar troca no primeiro login
+sudo ./create_users.sh -f funcionarios.txt -P -c -v
 
 # Verificar
 sudo ./verify_users.sh
+
+# Ver logs
+sudo tail -f /var/log/user_management.log
 ```
 
-### Exemplo 2: Gerenciamento completo
+### Exemplo 2: Criar usuário com todas as opções
 ```bash
-# 1. Teste primeiro
-sudo ./create_users_gid.sh -d "teste1;teste2;teste3"
+# Criar usuário completo
+sudo ./create_users.sh \
+  -g "João Silva - Desenvolvedor" \
+  -G "docker,sudo,developers" \
+  -P \
+  -c \
+  -v \
+  "joao_silva"
+```
 
-# 2. Criar usuários
-sudo ./create_users_gid.sh "user1;user2;user3" -p "MinhaSenh@123"
+### Exemplo 3: Gerenciamento completo
+```bash
+# 1. Teste primeiro (dry-run)
+sudo ./create_users.sh -d "teste1;teste2;teste3"
+
+# 2. Criar usuários com senha segura
+sudo ./create_users.sh "user1;user2;user3" -P -c
 
 # 3. Verificar
 sudo ./verify_users.sh user1 user2 user3
 
-# 4. Excluir se necessário
+# 4. Excluir se necessário (com backup)
 sudo ./delete_users.sh -rb user1 user2 user3
 ```
 
 ## 📋 Opções dos Scripts
 
-### create_users_gid.sh
+### create_users.sh
 ```
--f, --file           Lê usuários de arquivo
--p, --password       Define senha padrão
--s, --shell          Define shell personalizado
--d, --dry-run        Teste sem executar
--v, --verbose        Modo verboso
--h, --help           Ajuda
+-f, --file             Lê usuários de arquivo
+-p, --password         Define senha padrão (menos seguro - aparece no histórico)
+-P, --prompt-password  Solicita senha de forma segura (recomendado)
+-s, --shell            Define shell personalizado
+-g, --gecos            Define descrição/GECOS do usuário
+-G, --groups           Grupos secundários (separados por vírgula)
+-c, --change-password  Força troca de senha no primeiro login
+-d, --dry-run          Teste sem executar (mostra comandos exatos)
+-v, --verbose          Modo verboso
+-h, --help             Ajuda
 ```
 
 ### delete_users.sh
@@ -182,20 +238,68 @@ verify_users.sh [user1] [user2] ...
 
 ## ⚠️ Pré-requisitos
 
-- **Sistema**: RHEL/CentOS/Fedora/Ubuntu/Debian
+### Sistema Operacional:
+- **Sistemas suportados**: RHEL/CentOS/Fedora/Ubuntu/Debian
+- **Versão mínima do Bash**: 4.0+
 - **Permissões**: Executar como root (sudo)
-- **Grupos**: Grupo 'sas' deve existir ou ser criado
 
-### Criar grupo SAS:
+### Dependências do Sistema:
+Os seguintes comandos devem estar disponíveis:
+- `useradd`, `userdel`, `usermod`
+- `groupadd`, `getent`
+- `chgrp`, `chmod`, `chage`, `chpasswd`
+- `ps`, `who`, `df`, `du`, `tar`
+
+### Grupos Necessários:
+- Grupo 'sas' deve existir ou ser criado
+- Grupo 'users10000' (GID 10000) será criado automaticamente
+
+#### Criar grupo SAS:
 ```bash
 sudo groupadd sas
 ```
+
+### Permissões de Arquivo:
+- Log file: `/var/log/user_management.log` (será criado automaticamente)
+- Backups: `/root/user_backups/` (será criado automaticamente)
+
+### Espaço em Disco:
+- Mínimo 100MB livre em `/home` para cada usuário
+- Espaço adicional para backups (se usar opção `-b`)
 
 ## 🔍 Solução de Problemas
 
 ### Erro "Grupo 'sas' não existe":
 ```bash
 sudo groupadd sas
+```
+
+### Erro "Senha não atende aos requisitos":
+A senha deve ter:
+- Mínimo 8 caracteres
+- 1 letra maiúscula, 1 minúscula, 1 número, 1 caractere especial
+- Exemplo válido: `Senh@Forte123`
+
+### Erro "Espaço em disco insuficiente":
+```bash
+# Verificar espaço disponível
+df -h /home
+
+# Limpar espaço se necessário
+sudo apt clean  # Ubuntu/Debian
+sudo dnf clean all  # RHEL/Fedora
+```
+
+### Erro "Usuário tem processos em execução":
+```bash
+# Ver processos do usuário
+ps -u username
+
+# Finalizar processos (use com cuidado)
+sudo pkill -u username
+
+# Ou forçar exclusão
+sudo ./delete_users.sh -f -r username
 ```
 
 ### Verificar configuração atual:
@@ -208,15 +312,36 @@ getent passwd | awk -F: '$4==10000 {print $1, $3, $4, $6}'
 
 # Verificar diretórios
 ls -la /home/ | grep sas
+
+# Ver logs de operações
+sudo tail -50 /var/log/user_management.log
+
+# Ver logs do sistema
+sudo journalctl -xe | grep -i user
 ```
 
-### Logs e debug:
+### Debug e modo verboso:
 ```bash
-# Usar modo verboso
-sudo ./create_users_gid.sh -v -d "user1;user2"
+# Usar modo verboso para mais detalhes
+sudo ./create_users.sh -v -d "user1;user2"
 
-# Verificar logs do sistema
-sudo tail -f /var/log/messages
+# Verificar sintaxe de arquivo
+sudo ./create_users.sh -d -f users.txt
+
+# Ver o que seria executado (dry-run)
+sudo ./delete_users.sh -d -r username
+```
+
+### Backup corrompido ou espaço insuficiente:
+```bash
+# Verificar integridade de backup
+tar -tzf /root/user_backups/username_*.tar.gz
+
+# Limpar backups antigos
+sudo find /root/user_backups -mtime +30 -delete
+
+# Verificar espaço disponível
+df -h /root
 ```
 
 ## 📄 Estrutura dos Arquivos Criados
@@ -241,8 +366,40 @@ Este projeto está sob a licença MIT. Veja o arquivo LICENSE para detalhes.
 
 ## ✨ Recursos
 
-- ✅ **Seguro**: Validações completas e proteções
-- ✅ **Flexível**: Múltiplos formatos de entrada
-- ✅ **Informativo**: Logs coloridos e detalhados
-- ✅ **Testável**: Modo dry-run em todos os scripts
-- ✅ **Robusto**: Tratamento de erros e casos extremos
+- ✅ **Seguro**: Validações completas, verificação de processos e proteções de sistema
+- ✅ **Senhas fortes**: Validação de complexidade com requisitos configuráveis
+- ✅ **Flexível**: Múltiplos formatos de entrada e opções avançadas
+- ✅ **Informativo**: Logs coloridos, detalhados e persistentes em arquivo
+- ✅ **Testável**: Modo dry-run mostra comandos exatos antes de executar
+- ✅ **Robusto**: Tratamento de sinais, erros e casos extremos
+- ✅ **Auditável**: Logging completo de todas as operações
+- ✅ **Confiável**: Verificação de integridade de backups e espaço em disco
+
+## 🆕 Melhorias Implementadas (v2.0)
+
+### Segurança:
+- ✨ Opção de senha segura via prompt interativo (`-P`)
+- ✨ Validação de complexidade de senha (8+ chars, maiúsc/minúsc/num/especial)
+- ✨ Opção de forçar troca de senha no primeiro login (`-c`)
+- ✨ Verificação de processos em execução antes de excluir
+- ✨ Proteção adicional contra exclusão de usuários do sistema
+
+### Validações:
+- ✨ Verificação de espaço em disco antes de criar usuário
+- ✨ Verificação de espaço em disco antes de backup
+- ✨ Validação de sintaxe de arquivo de entrada
+- ✨ Verificação de UID disponível
+- ✨ Verificação de integridade de backup após criação
+
+### Funcionalidades:
+- ✨ Suporte para GECOS (descrição do usuário) via `-g`
+- ✨ Suporte para grupos secundários via `-G`
+- ✨ Logging persistente em arquivo (`/var/log/user_management.log`)
+- ✨ Modo dry-run melhorado mostra comandos exatos
+- ✨ Tratamento de sinais (SIGINT/SIGTERM) para limpeza adequada
+
+### Código:
+- ✨ Variáveis de configuração como `readonly`
+- ✨ Funções compartilhadas para melhor manutenção
+- ✨ Mensagens de erro mais claras e informativas
+- ✨ Correção de bugs (PRIMARY_GROUP_NAME, permissões, etc)

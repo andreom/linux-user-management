@@ -24,6 +24,24 @@ BACKUP_HOME=false
 DRY_RUN=false
 FROM_FILE=false
 INTERACTIVE=true
+readonly LOG_FILE="/var/log/user_management.log"
+
+# Tratamento de sinais para limpeza
+cleanup() {
+    log_warning "Script interrompido. Limpando..."
+    exit 130
+}
+
+trap cleanup SIGINT SIGTERM
+
+# Função para logging em arquivo
+log_to_file() {
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    if [[ -w "$LOG_FILE" ]] || [[ -w "$(dirname "$LOG_FILE")" ]]; then
+        echo "[$timestamp] $message" >> "$LOG_FILE" 2>/dev/null
+    fi
+}
 
 # Usuários protegidos do sistema (não devem ser excluídos)
 PROTECTED_USERS=(
@@ -67,18 +85,22 @@ show_help() {
 # Função para log
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
+    log_to_file "INFO: $1"
 }
 
 log_success() {
     echo -e "${GREEN}[SUCESSO]${NC} $1"
+    log_to_file "SUCESSO: $1"
 }
 
 log_warning() {
     echo -e "${YELLOW}[AVISO]${NC} $1"
+    log_to_file "AVISO: $1"
 }
- 
+
 log_error() {
     echo -e "${RED}[ERRO]${NC} $1"
+    log_to_file "ERRO: $1"
 }
 
 # Função para verificar se usuário existe
@@ -103,6 +125,63 @@ is_protected_user() {
     return 1
 }
 
+# Função para verificar processos do usuário
+check_user_processes() {
+    local username="$1"
+    local process_count=$(ps -u "$username" 2>/dev/null | wc -l)
+
+    # Subtrair 1 porque ps sempre inclui o cabeçalho
+    process_count=$((process_count - 1))
+
+    if [[ $process_count -gt 0 ]]; then
+        log_warning "Usuário '$username' tem $process_count processo(s) em execução"
+        if [[ "$FORCE_DELETE" == "false" ]]; then
+            log_info "Processos do usuário '$username':"
+            ps -u "$username" -o pid,cmd --no-headers | head -n 10
+            if [[ $process_count -gt 10 ]]; then
+                log_info "... e mais $((process_count - 10)) processo(s)"
+            fi
+            return 1
+        else
+            log_warning "Forçando exclusão apesar dos processos em execução"
+        fi
+    fi
+
+    return 0
+}
+
+# Função para verificar espaço em disco para backup
+check_disk_space_for_backup() {
+    local home_dir="$1"
+    local backup_dir="${2:-/root/user_backups}"
+
+    if [[ ! -d "$home_dir" ]]; then
+        return 0
+    fi
+
+    # Calcular tamanho do diretório home
+    local home_size_mb=$(du -sm "$home_dir" 2>/dev/null | awk '{print $1}')
+
+    # Obter espaço disponível no destino do backup
+    local available_mb=$(df -BM "$backup_dir" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/M//')
+
+    # Se não conseguir obter, tentar diretório pai
+    if [[ -z "$available_mb" ]]; then
+        available_mb=$(df -BM "$(dirname "$backup_dir")" 2>/dev/null | awk 'NR==2 {print $4}' | sed 's/M//')
+    fi
+
+    # Adicionar 20% de margem de segurança
+    local required_mb=$((home_size_mb * 12 / 10))
+
+    if [[ $available_mb -lt $required_mb ]]; then
+        log_error "Espaço insuficiente para backup. Disponível: ${available_mb}MB, Necessário: ${required_mb}MB"
+        return 1
+    fi
+
+    log_info "Espaço verificado: Home=${home_size_mb}MB, Disponível=${available_mb}MB"
+    return 0
+}
+
 # Função para obter informações do usuário
 get_user_info() {
     local username="$1"
@@ -121,23 +200,34 @@ get_user_info() {
 backup_home_directory() {
     local username="$1"
     local home_dir=$(getent passwd "$username" | cut -d: -f6)
-    
+
     if [[ ! -d "$home_dir" ]]; then
         log_warning "Diretório home '$home_dir' não encontrado para $username"
         return 1
     fi
-    
+
     local backup_dir="/root/user_backups"
     local timestamp=$(date +%Y%m%d_%H%M%S)
     local backup_file="$backup_dir/${username}_${timestamp}.tar.gz"
-    
+
+    # Verificar espaço em disco antes de fazer backup
+    if ! check_disk_space_for_backup "$home_dir" "$backup_dir"; then
+        return 1
+    fi
+
     # Cria diretório de backup se não existir
     mkdir -p "$backup_dir"
-    
+
     log_info "Fazendo backup de $home_dir para $backup_file"
-    
+
     if tar -czf "$backup_file" -C "$(dirname "$home_dir")" "$(basename "$home_dir")" 2>/dev/null; then
         log_success "Backup criado: $backup_file"
+        # Verificar integridade do backup
+        if tar -tzf "$backup_file" >/dev/null 2>&1; then
+            log_success "Integridade do backup verificada"
+        else
+            log_warning "Aviso: Não foi possível verificar integridade do backup"
+        fi
         return 0
     else
         log_error "Falha ao criar backup de $home_dir"
@@ -177,6 +267,12 @@ delete_user() {
             log_error "Use -f para forçar a exclusão de usuário logado"
             return 1
         fi
+    fi
+
+    # Verifica processos em execução
+    if ! check_user_processes "$username"; then
+        log_error "Usuário tem processos em execução. Use -f para forçar a exclusão"
+        return 1
     fi
     
     # Confirmação interativa
